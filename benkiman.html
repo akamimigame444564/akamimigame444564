@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ベンキマンブログ (パスワード認証投稿)</title>
+    <!-- Tailwind CSS CDNを読み込み -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Font Awesomeを読み込み（アイコン用） -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    
+    <!-- ========== STYLES (デザインはモノクローム基調に刷新) ========== -->
+    <style>
+        /* 全ての要素に太いボーダーを適用するカスタムスタイル */
+        .omocoro-border {
+            border: 3px solid black;
+        }
+        /* 常にシャドウを適用 */
+        .omocoro-shadow {
+            box-shadow: 4px 4px 0px 0px rgba(0, 0, 0, 1);
+        }
+        /* 記事カードのホバーエフェクト（影を大きくずらす）を維持 */
+        .article-card {
+            transition: all 0.2s ease-in-out;
+            box-shadow: 4px 4px 0px 0px rgba(0, 0, 0, 1);
+        }
+        .article-card:hover {
+            transform: translate(0px, 0px);
+            box-shadow: -4px -4px 0px 0px rgba(0, 0, 0, 1);
+        }
+        /* ロゴの特別シャドウ */
+        .omocoro-logo-shadow {
+            /* ロゴの影は赤くして強調 */
+            text-shadow: 2px 2px 0px #ff0000; 
+        }
+        /* モノクローム基調の配色 */
+        body {
+            background-color: #f7f7f7; /* わずかにグレーの背景 */
+            font-family: 'Inter', 'Noto Sans JP', 'Helvetica Neue', Arial, sans-serif;
+            color: #1a1a1a;
+        }
+        .bg-omocoro-red { background-color: #ff0000; }
+        .text-omocoro-red { color: #ff0000; }
+        .bg-omocoro-vivid-red { background-color: #ff0000; }
+        .text-omocoro-vivid-red { color: #ff0000; }
+
+        /* Googleフォームの埋め込みコンテナの高さ調整を修正 */
+        .form-iframe-container {
+            /* 修正点: 高さを固定せず、padding-bottomでアスペクト比を維持して、全内容を表示させる */
+            position: relative;
+            width: 100%;
+            padding-bottom: 110%; /* フォームの高さに合わせて調整 */
+            height: 0;
+            overflow: hidden;
+        }
+
+        .form-iframe-container iframe {
+            /* 修正点: iframe自身をコンテナに合わせる */
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        // モノクロ基調のため、鮮やかな色はアクセントとハイライトに限定
+                        'omocoro-red': '#ff0000',
+                        'omocoro-vivid-red': '#ff0000',
+                        // 旧カラーの要素は白黒グレーに置き換え
+                        'omocoro-yellow': '#f0f0f0', // 薄いグレー
+                        'omocoro-green': '#e0e0e0',
+                        'omocoro-blue': '#d0d0d0',
+                        'omocoro-purple': '#c0c0c0',
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="text-gray-900">
+
+    <!-- ========== JAVASCRIPT LOGIC & FIREBASE SETUP ========== -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, query, onSnapshot, addDoc, serverTimestamp, deleteDoc, doc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firestoreのデバッグログを有効化
+        setLogLevel('Debug');
+
+        let db;
+        let auth;
+        let isPostAllowed = false; // パスワード認証後の投稿許可フラグ
+        
+        // --- 設定値 ---
+        const ADMIN_PASSWORD = "omocoro"; // 管理用パスワード
+        const MAX_ATTEMPTS = 5; // 最大試行回数
+        const LOCKOUT_DURATION = 60 * 1000; // ロックアウト時間 (1分)
+        
+        let currentUserId = 'anonymous-loading';
+
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // アプリケーション初期化
+        const app = initializeApp(firebaseConfig);
+        
+        window.onload = async () => {
+            auth = getAuth(app);
+            
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+                
+                db = getFirestore(app);
+                currentUserId = auth.currentUser?.uid || 'anonymous-' + crypto.randomUUID();
+                
+                startArticleListener();
+
+            } catch (error) {
+                console.error("Firebase Auth or Init Error:", error);
+                showModal(`認証に失敗しました。アプリを再読み込みしてください。エラー: ${error.code}`, 'error');
+                // 認証失敗時のUIを更新
+                document.getElementById('article-list').innerHTML = '<p class="text-red-600 font-bold p-4 omocoro-border bg-white text-center omocoro-shadow">認証エラーにより記事の読み込みができませんでした。</p>';
+                document.getElementById('featured-section').innerHTML = '';
+            }
+        };
+
+        // --- パスワード認証とセッション管理 ---
+        
+        // パスワード入力モーダルを開く
+        window.openPasswordModal = function() {
+            const modal = document.getElementById('password-modal');
+            const messageElement = document.getElementById('password-modal-message');
+            const inputElement = document.getElementById('admin-password-input');
+            const currentAttempts = parseInt(sessionStorage.getItem('attemptCount') || '0', 10);
+            const lockUntil = parseInt(sessionStorage.getItem('lockUntil') || '0', 10);
+
+            if (isPostAllowed) {
+                // 既に認証済みならメッセージ表示で終了
+                showModal('既に管理者権限を取得しています。', 'success');
+                return;
+            }
+            
+            if (lockUntil > Date.now()) {
+                const timeLeft = Math.ceil((lockUntil - Date.now()) / 1000);
+                messageElement.textContent = `ロックアウト中です。残り${timeLeft}秒待ってください。`;
+                messageElement.className = 'text-red-600 font-bold mb-4';
+                document.getElementById('password-modal-submit').disabled = true;
+                modal.classList.remove('hidden');
+                return;
+            }
+            
+            messageElement.textContent = `管理者パスワードを入力してください。（残り ${MAX_ATTEMPTS - currentAttempts} 回）`;
+            messageElement.className = 'text-sm font-medium mb-4';
+            inputElement.value = '';
+            document.getElementById('password-modal-submit').disabled = false;
+            modal.classList.remove('hidden');
+        }
+
+        // パスワードチェック
+        window.checkPassword = function() {
+            const inputPassword = document.getElementById('admin-password-input').value;
+            const modal = document.getElementById('password-modal');
+            const messageElement = document.getElementById('password-modal-message');
+            let currentAttempts = parseInt(sessionStorage.getItem('attemptCount') || '0', 10);
+
+            if (inputPassword === ADMIN_PASSWORD) {
+                // 成功
+                isPostAllowed = true;
+                sessionStorage.removeItem('attemptCount');
+                sessionStorage.removeItem('lockUntil');
+                modal.classList.add('hidden');
+                
+                document.getElementById('admin-section').classList.remove('hidden'); // フォーム表示
+                document.getElementById('admin-status-display').innerHTML = '【管理者モードON】<button onclick="logoutAdminMode()" class="ml-2 px-2 py-0.5 text-xs font-bold text-white bg-omocoro-vivid-red omocoro-border omocoro-shadow hover:bg-red-700">モードを終了</button>';
+
+                showModal('管理者認証に成功しました！', 'success');
+                
+                // 削除ボタンの表示/非表示を更新
+                startArticleListener();
+
+            } else {
+                // 失敗
+                currentAttempts++;
+                sessionStorage.setItem('attemptCount', currentAttempts);
+
+                if (currentAttempts >= MAX_ATTEMPTS) {
+                    // ロックアウト
+                    const lockUntil = Date.now() + LOCKOUT_DURATION;
+                    sessionStorage.setItem('lockUntil', lockUntil);
+                    sessionStorage.setItem('attemptCount', 0);
+                    modal.classList.add('hidden');
+                    showModal('パスワードを5回間違えました。1分間ロックアウトします。', 'error');
+                } else {
+                    // 失敗メッセージ
+                    messageElement.textContent = `パスワードが違います。残り ${MAX_ATTEMPTS - currentAttempts} 回`;
+                    messageElement.className = 'text-red-600 font-bold mb-4';
+                }
+            }
+        }
+        
+        // 管理者モード終了
+        window.logoutAdminMode = function() {
+            isPostAllowed = false;
+            document.getElementById('admin-section').classList.add('hidden');
+            document.getElementById('admin-status-display').textContent = '閲覧モード';
+            showModal('管理者モードを終了しました。', 'default');
+            
+            // 削除ボタンを非表示にするために再描画を促す
+            startArticleListener();
+        }
+
+
+        // --- Firestore 関連関数 ---
+
+        // 記事リスナーの開始
+        function startArticleListener() {
+            if (!db) return;
+            // 記事データが保存されているFirestoreのパス
+            const path = `/artifacts/${appId}/public/data/articles`;
+            const q = query(collection(db, path));
+            
+            // リアルタイムリスナーを設定
+            onSnapshot(q, (snapshot) => {
+                const articles = [];
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    articles.push({ 
+                        id: doc.id, 
+                        title: data.title, 
+                        category: data.category, 
+                        imageUrl: data.imageUrl, 
+                        content: data.content || '本文がありません。',
+                        timestamp: data.timestamp ? data.timestamp.toDate() : new Date(),
+                        authorId: data.authorId || 'unknown'
+                    });
+                });
+                
+                articles.sort((a, b) => b.timestamp - a.timestamp); // 降順でソート
+                renderArticles(articles);
+            }, (error) => {
+                console.error("Error listening to articles:", error);
+                // 記事リストとフィーチャーセクションをクリア
+                let errorMessage = '<p class="text-red-600 font-bold p-4 omocoro-border bg-white text-center omocoro-shadow">記事の読み込み中にエラーが発生しました。</p>';
+                document.getElementById('article-list').innerHTML = errorMessage;
+                document.getElementById('featured-section').innerHTML = errorMessage;
+            });
+        }
+
+        // 記事のレンダリング (HTML生成)
+        function renderArticles(articles) {
+            const listElement = document.getElementById('article-list');
+            listElement.innerHTML = '';
+            
+            // フィーチャー記事（最新の1件）
+            const featuredArticle = articles.length > 0 ? articles[0] : null;
+            if (featuredArticle) {
+                 // 記事がある場合は、特集セクションの表示を更新
+                 document.getElementById('featured-section').innerHTML = createArticleCard(featuredArticle, true);
+            } else {
+                 // 記事が0件の場合、フィーチャーセクションにメッセージを表示
+                 document.getElementById('featured-section').innerHTML = `
+                     <div class="omocoro-border omocoro-shadow bg-white p-8 text-center">
+                         <h2 class="text-3xl font-black text-omocoro-vivid-red mb-2">記事がありません</h2>
+                         <p class="text-lg text-gray-700 font-bold">現在、記事はまだ投稿されていません...</p>
+                     </div>
+                 `;
+            }
+
+            // 通常記事（2件目以降）の処理
+            if (articles.length > 1) {
+                // グリッドにレンダリング
+                articles.slice(1).forEach((article) => {
+                    const cardHtml = createArticleCard(article, false);
+                    listElement.insertAdjacentHTML('beforeend', cardHtml);
+                });
+                // 「もっと古い記事を見る」ボタンを表示
+                document.getElementById('more-button-container').classList.remove('hidden');
+            } else {
+                // 記事が1件以下の場合、記事一覧エリアにメッセージを表示
+                listElement.innerHTML = `
+                    <div class="col-span-full">
+                        <p class="text-center text-lg text-gray-600 font-bold p-4 omocoro-border bg-gray-50 omocoro-shadow">
+                            ${articles.length === 1 ? '特集記事以外に公開中の記事はありません。' : '記事一覧に表示できる記事はありません。'}
+                        </p>
+                    </div>
+                `;
+                // 「もっと古い記事を見る」ボタンを非表示
+                document.getElementById('more-button-container').classList.add('hidden');
+            }
+            
+            attachDeleteListeners();
+        }
+
+        // 記事カードHTML生成関数
+        function createArticleCard(article, isFeatured) {
+            const dateStr = article.timestamp.toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit' }).replace(/\//g, '.');
+            
+            const deleteButton = isPostAllowed ? 
+                `<button data-id="${article.id}" class="delete-btn text-xs bg-omocoro-vivid-red hover:bg-red-700 text-white font-bold px-2 py-0.5 mt-2 omocoro-border omocoro-shadow">管理者削除</button>` : '';
+
+            // 本文の最初の100文字をプレビューとして使用
+            const contentPreview = article.content.substring(0, 100) + (article.content.length > 100 ? '...' : '');
+
+            if (isFeatured) {
+                return `
+                <a href="#" class="article-card block bg-white omocoro-border shadow-lg">
+                    <div class="lg:flex">
+                        <div class="lg:w-2/3 p-1 omocoro-border-b lg:border-r-4 lg:border-b-0 border-black">
+                            <img src="${article.imageUrl}" onerror="this.onerror=null;this.src='https://placehold.co/900x550/f0f0f0/333333?text=FEATURED+IMAGE'" alt="フィーチャー記事サムネイル" class="w-full h-auto object-cover omocoro-border">
+                        </div>
+                        <div class="lg:w-1/3 p-4 bg-gray-100">
+                            <p class="text-sm font-bold bg-omocoro-vivid-red text-white inline-block px-2 py-0.5 omocoro-border rounded-none">今日の特集</p>
+                            <h2 class="text-3xl font-black mt-2 leading-snug">${article.title}</h2>
+                            <p class="text-gray-700 mt-2">${contentPreview}</p>
+                            <p class="text-sm text-gray-700 mt-4 font-bold">${article.category}</p>
+                            <p class="text-xs text-gray-500 mt-2 font-mono font-bold">${dateStr} / Author ID: ${article.authorId}</p>
+                            ${deleteButton}
+                        </div>
+                    </div>
+                </a>
+                `;
+            } else {
+                return `
+                <a href="#" class="article-card block bg-white omocoro-border rounded-none shadow-lg">
+                    <div class="p-1 omocoro-border-b">
+                        <img src="${article.imageUrl}" onerror="this.onerror=null;this.src='https://placehold.co/600x400/e0e0e0/000000?text=記事サムネイル'" alt="記事サムネイル" class="w-full h-auto object-cover omocoro-border">
+                    </div>
+                    <div class="p-3">
+                        <h2 class="text-lg font-extrabold leading-tight omocoro-border-b pb-1">${article.title}</h2>
+                        <p class="text-sm text-gray-700 mt-2">${contentPreview}</p>
+                        <p class="text-xs text-gray-500 mt-2 font-mono">${dateStr} / ${article.category} / Author ID: ${article.authorId}</p>
+                        ${deleteButton}
+                    </div>
+                </a>
+                `;
+            }
+        }
+
+        // 記事投稿処理
+        window.submitArticle = async function() {
+            const title = document.getElementById('article-title').value;
+            const category = document.getElementById('article-category').value;
+            // 画像URLがない場合は、カテゴリーをテキストにしたプレースホルダー画像を生成
+            const imageUrl = document.getElementById('article-image').value || `https://placehold.co/600x400/${Math.floor(Math.random()*16777215).toString(16)}/000000?text=${category}`;
+            const content = document.getElementById('article-content').value;
+            
+            if (!title || !category || !content) {
+                showModal('タイトル、カテゴリー、本文はすべて必須です。', 'error');
+                return;
+            }
+            
+            if (!isPostAllowed) {
+                showModal('記事を投稿するには管理者パスワード認証が必要です。フッターのリンクから認証してください。', 'error');
+                return;
+            }
+
+            const path = `/artifacts/${appId}/public/data/articles`;
+            try {
+                // Firestoreに記事を保存
+                await addDoc(collection(db, path), {
+                    title: title,
+                    category: category,
+                    imageUrl: imageUrl,
+                    content: content,
+                    timestamp: serverTimestamp(),
+                    authorId: currentUserId
+                });
+                showModal('記事が投稿されました！', 'success');
+                // フォームをクリア
+                document.getElementById('article-title').value = '';
+                document.getElementById('article-category').value = '企画'; 
+                document.getElementById('article-image').value = '';
+                document.getElementById('article-content').value = ''; 
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showModal('記事の投稿に失敗しました。', 'error');
+            }
+        }
+        
+        // 記事削除処理
+        async function deleteArticle(articleId) {
+            if (!isPostAllowed) {
+                 showModal('記事を削除するには管理者パスワード認証が必要です。', 'error');
+                 return;
+            }
+            
+            const path = `/artifacts/${appId}/public/data/articles`;
+            try {
+                // Firestoreから記事を削除
+                await deleteDoc(doc(db, path, articleId));
+                showModal('記事を削除しました。', 'success');
+            } catch (e) {
+                console.error("Error removing document: ", e);
+                showModal('記事の削除に失敗しました。', 'error');
+            }
+        }
+        
+        function attachDeleteListeners() {
+            document.querySelectorAll('.delete-btn').forEach(button => {
+                button.onclick = (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const articleId = e.target.dataset.id;
+                    showConfirmModal('この記事を本当に削除しますか？ (管理者操作)', () => deleteArticle(articleId));
+                };
+            });
+        }
+
+
+        // --- UI 関連関数 (Modal) ---
+        
+        function showModal(message, type = 'default') {
+            const modal = document.getElementById('custom-modal');
+            const messageElement = document.getElementById('modal-message');
+            const okButton = document.getElementById('modal-alert-ok');
+
+            messageElement.textContent = message;
+            document.getElementById('modal-confirm-container').classList.add('hidden');
+            document.getElementById('modal-alert-container').classList.remove('hidden');
+
+            // 色の変更
+            okButton.classList.remove('bg-omocoro-green', 'bg-omocoro-vivid-red', 'bg-gray-400', 'text-white', 'text-black', 'bg-gray-700');
+            if (type === 'success') {
+                okButton.classList.add('bg-gray-700', 'text-white');
+            } else if (type === 'error') {
+                okButton.classList.add('bg-omocoro-vivid-red', 'text-white');
+            } else {
+                okButton.classList.add('bg-gray-400', 'text-black');
+            }
+
+            modal.classList.remove('hidden');
+        }
+        
+        function showConfirmModal(message, onConfirm) {
+            const modal = document.getElementById('custom-modal');
+            document.getElementById('modal-message').textContent = message;
+            document.getElementById('modal-alert-container').classList.add('hidden');
+            document.getElementById('modal-confirm-container').classList.remove('hidden');
+
+            document.getElementById('modal-confirm-yes').onclick = () => {
+                onConfirm();
+                modal.classList.add('hidden');
+            };
+            document.getElementById('modal-confirm-no').onclick = () => {
+                modal.classList.add('hidden');
+            };
+            modal.classList.remove('hidden');
+        }
+
+        window.closeModal = function() {
+            document.getElementById('custom-modal').classList.add('hidden');
+        }
+    </script>
+    
+    <!-- ========== HTML BODY (コンテンツ構造) ========== -->
+    
+    <!-- カスタムモーダル (アラート/確認用) -->
+    <div id="custom-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="omocoro-border omocoro-shadow bg-white p-6 w-11/12 max-w-sm">
+            <p id="modal-message" class="text-lg font-bold mb-4"></p>
+            
+            <!-- アラート用ボタン -->
+            <div id="modal-alert-container" class="text-right">
+                <button id="modal-alert-ok" onclick="closeModal()" class="omocoro-border bg-gray-400 text-black font-bold px-4 py-2 hover:opacity-80 omocoro-shadow">OK</button>
+            </div>
+            
+            <!-- 確認用ボタン -->
+            <div id="modal-confirm-container" class="flex justify-end space-x-4 hidden">
+                <button id="modal-confirm-no" class="omocoro-border bg-gray-300 text-black font-bold px-4 py-2 hover:bg-gray-400 omocoro-shadow">キャンセル</button>
+                <button id="modal-confirm-yes" class="omocoro-border bg-omocoro-vivid-red text-white font-bold px-4 py-2 hover:bg-red-700 omocoro-shadow">認証</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- パスワード入力モーダル -->
+    <div id="password-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50">
+        <div class="omocoro-border omocoro-shadow bg-white p-6 w-11/12 max-w-sm">
+            <h3 class="text-xl font-black mb-4 omocoro-border bg-gray-100 p-1 text-center">管理者認証</h3>
+            <p id="password-modal-message" class="text-sm font-medium mb-4 text-center">管理者パスワードを入力してください。</p>
+            
+            <input type="password" id="admin-password-input" placeholder="パスワード" class="w-full omocoro-border px-3 py-2 mb-4 omocoro-shadow focus:ring-omocoro-vivid-red focus:ring-2" onkeyup="if(event.key === 'Enter') checkPassword()">
+            
+            <div class="flex justify-end space-x-2">
+                <button onclick="document.getElementById('password-modal').classList.add('hidden')" class="omocoro-border bg-gray-300 text-black font-bold px-4 py-2 hover:bg-gray-400 omocoro-shadow">キャンセル</button>
+                <button id="password-modal-submit" onclick="checkPassword()" class="omocoro-border bg-omocoro-vivid-red text-white font-bold px-4 py-2 hover:bg-red-700 omocoro-shadow">認証</button>
+            </div>
+        </div>
+    </div>
+
+
+    <!-- 1. トップバナー/サブナビゲーションエリア (モノクロ) -->
+    <div class="bg-black py-0.5">
+        <div class="container mx-auto flex justify-between items-center px-2 max-w-7xl">
+            <!-- サイト情報 / 管理者ステータス -->
+            <div class="flex items-center text-xs text-yellow-500 font-mono">
+                <span id="admin-status-display">閲覧モード</span>
+            </div>
+            <div>
+                <p class="text-xs text-gray-500">インターネットは広大だ...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. メインヘッダーエリア -->
+    <header class="bg-white omocoro-border border-t-0 omocoro-shadow">
+        <div class="container mx-auto flex justify-between items-center p-3 max-w-7xl">
+            
+            <!-- ロゴ/サイト名 (色を反転させ、目立つように黒背景、白文字に修正) -->
+            <div class="flex items-center space-x-3">
+                <div class="omocoro-border omocoro-shadow bg-black text-white p-1">
+                    <a href="#" class="text-4xl font-black omocoro-logo-shadow tracking-tighter">
+                        ベンキマン
+                    </a>
+                </div>
+                <!-- 検索窓 -->
+                <div class="hidden md:block relative">
+                    <input type="text" placeholder="記事を検索..." class="omocoro-border px-2 py-0.5 text-sm w-48 lg:w-64 focus:outline-none focus:ring-2 focus:ring-omocoro-vivid-red omocoro-shadow">
+                    <button class="absolute right-0 top-0 h-full px-2 omocoro-border border-l-0 bg-gray-100 hover:bg-gray-200 omocoro-shadow">
+                        <i class="fas fa-search text-sm"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- デスクトップ用ナビゲーション (アンカーリンク実装) -->
+            <nav class="hidden md:block">
+                <ul class="flex space-x-4 text-lg font-extrabold">
+                    <li><a href="#main-articles" class="hover:text-omocoro-vivid-red text-black transition-colors duration-150">読む</a></li>
+                    <li><a href="#contribute-section" class="hover:text-omocoro-vivid-red text-black transition-colors duration-150">作る</a></li>
+                    <li><a href="#applicant-form-section" class="hover:text-omocoro-vivid-red text-black transition-colors duration-150">応募</a></li>
+                    <li><a href="#recruitment-section" class="hover:text-omocoro-vivid-red text-black transition-colors duration-150">募集</a></li>
+                    <li><a href="#contact-section" class="hover:text-omocoro-vivid-red text-black transition-colors duration-150">問合せ</a></li>
+                </ul>
+            </nav>
+
+            <!-- モバイル用メニューボタン -->
+            <button id="menu-button" class="md:hidden p-2 omocoro-border bg-gray-200 omocoro-shadow">
+                <i class="fas fa-bars text-xl text-black"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- モバイルメニュー -->
+    <div id="mobile-menu" class="hidden md:hidden omocoro-border-t-0 omocoro-border omocoro-shadow bg-white fixed w-full z-10">
+        <nav class="p-3">
+            <ul class="space-y-1 text-base font-bold">
+                <li><a href="#main-articles" class="block p-2 hover:bg-gray-100 omocoro-border-b">読む</a></li>
+                <li><a href="#contribute-section" class="block p-2 hover:bg-gray-100 omocoro-border-b">作る</a></li>
+                <li><a href="#applicant-form-section" class="block p-2 hover:bg-gray-100 omocoro-border-b">応募</a></li>
+                <li><a href="#recruitment-section" class="block p-2 hover:bg-gray-100 omocoro-border-b">募集</a></li>
+                <li><a href="#contact-section" class="block p-2 hover:bg-gray-100 omocoro-border-b">問合せ</a></li>
+                <li><a href="#" class="block p-2 hover:bg-gray-100">検索 <i class="fas fa-search"></i></a></li>
+            </ul>
+        </nav>
+    </div>
+
+    <!-- メインコンテンツ -->
+    <main class="container mx-auto p-4 max-w-7xl">
+        
+        <!-- 管理者限定投稿セクション (管理者認証成功時のみ表示) -->
+        <section id="admin-section" class="mt-4 mb-8 hidden omocoro-border omocoro-shadow bg-white p-4">
+            <h2 class="text-xl font-extrabold mb-3 omocoro-border bg-omocoro-vivid-red text-white p-1">
+                <i class="fas fa-feather-alt mr-2"></i> 記事投稿 (管理者限定)
+            </h2>
+            <div class="space-y-2 text-sm">
+                <input type="text" id="article-title" placeholder="記事タイトル (必須)" class="w-full omocoro-border px-2 py-1 omocoro-shadow">
+                
+                <!-- 記事投稿カテゴリーの選択肢 -->
+                <select id="article-category" class="omocoro-border px-2 py-1 omocoro-shadow">
+                    <option value="企画">企画 (一般)</option>
+                    <option value="検証">検証</option>
+                    <option value="実験">実験</option>
+                    <option value="考察">考察</option>
+                    <option value="食レポ">食レポ</option>
+                    <option value="レビュー">レビュー</option>
+                    <option value="図鑑">図鑑</option>
+                    <option value="体当たり">体当たり</option>
+                    <option value="街歩き">街歩き</option>
+                    <option value="雑談">雑談</option>
+                    <option value="ライフ">ライフ</option>
+                    <option value="地の底の企画">地の底の企画 (アイデア募集)</option>
+                    <option value="夢の再現チャレンジ">夢の再現チャレンジ</option>
+                    <option value="怪しい写真投稿">怪しい写真投稿 (読者参加)</option>
+                    <option value="人生の最も無駄な話">人生の最も無駄な話 (読者参加)</option>
+                </select>
+
+                <input type="text" id="article-image" placeholder="画像URL (省略可)" class="w-full omocoro-border px-2 py-1 omocoro-shadow">
+                <!-- 記事本文のテキストエリアを追加 -->
+                <textarea id="article-content" rows="5" placeholder="記事の本文（必須）をここに入力..." class="w-full omocoro-border px-2 py-1 omocoro-shadow"></textarea>
+                
+                <button onclick="submitArticle()" class="omocoro-border bg-black text-white font-bold px-4 py-1.5 w-full hover:bg-gray-800 omocoro-shadow">
+                    記事を投稿する！
+                </button>
+            </div>
+        </section>
+
+
+        <!-- 3. フィーチャー記事セクション (トップ記事) -->
+        <section class="mt-8 mb-10" id="featured-section">
+            <!-- 記事リスナーによって動的に挿入されます -->
+        </section>
+
+        <!-- 4. 記事一覧 (読むセクション) -->
+        <section id="main-articles">
+            <h1 class="text-3xl font-extrabold my-6 p-2 omocoro-border bg-white text-black omocoro-shadow inline-block">
+                新着記事を読む
+            </h1>
+            <div id="article-list" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                <!-- 記事リスナーによって動的に挿入されます -->
+            </div>
+        </section>
+        
+        <!-- もっと見るボタン (記事が2件以上ある場合のみ表示されるようにhiddenを初期設定) -->
+        <div id="more-button-container" class="flex justify-center my-10 hidden">
+            <button class="px-8 py-2 omocoro-border bg-gray-200 text-black text-xl font-bold hover:bg-gray-300 transition duration-150 omocoro-shadow">
+                もっと古い記事を見る
+            </button>
+        </div>
+        
+        <!-- 5. 大きなバナーエリア (作るセクション) -->
+        <section class="mb-10 omocoro-border border-4 border-omocoro-vivid-red bg-white p-3 omocoro-shadow" id="contribute-section">
+            <h2 class="text-2xl font-extrabold text-center omocoro-border bg-omocoro-vivid-red text-white py-1 mb-3">
+                <i class="fas fa-lightbulb mr-2"></i> 読者が記事を作る
+            </h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <!-- 記事投稿システムへのリンク -->
+                <a href="#" class="block omocoro-border bg-gray-100 p-3 text-center font-black text-xl hover:bg-gray-200 omocoro-shadow">
+                    <i class="fas fa-edit mr-2"></i> 記事投稿システムについて
+                </a>
+                <!-- 読者編集部への応募フォームへ移動するリンクに変更 -->
+                <a href="#applicant-form-section" class="block omocoro-border bg-gray-200 p-3 text-center font-black text-xl hover:bg-gray-300 omocoro-shadow">
+                    <i class="fas fa-pen-nib mr-2"></i> 読者編集部に応募する
+                </a>
+            </div>
+        </section>
+
+        <!-- ★★★ 読者編集部 応募フォームセクションを新しく追加 ★★★ -->
+        <section id="applicant-form-section" class="mt-12">
+            <h1 class="text-3xl font-extrabold my-6 p-2 omocoro-border bg-white text-black omocoro-shadow inline-block">
+                <i class="fas fa-user-plus mr-2"></i> 読者編集部 応募フォーム
+            </h1>
+            <div class="omocoro-border omocoro-shadow bg-white p-4">
+                <p class="text-lg font-bold mb-3 omocoro-border-b pb-2">我こそはと思う方、ぜひご応募ください！</p>
+                <p class="text-sm text-gray-600 mb-4">※ Googleフォームを埋め込んでいます。このページではデータは保存されません。</p>
+
+                <!-- Googleフォーム埋め込み領域 (高さ修正) -->
+                <!-- form-iframe-containerクラスに修正を適用 -->
+                <div class="form-iframe-container omocoro-border-4 border-gray-300">
+                    <!-- 
+                        ★★★ ここに「読者編集部応募用」のGoogleフォームの埋め込みiframeタグをペーストしてください ★★★
+                    -->
+                   <iframe src="https://docs.google.com/forms/d/e/1FAIpQLSe5IZqfiwLo_gQ9sXVcIlTS5SyQl7WXZZNScPCXtR5zvTYVmg/viewform?embedded=true" width="640" height="1086" frameborder="0" marginheight="0" marginwidth="0">読み込んでいます…</iframe>
+                    <!-- 
+                        このフォームは動作確認用のダミーURLです。
+                        実際に利用する場合は、必ずご自身のGoogleフォームのURLに置き換えてください。
+                    -->
+                </div>
+            </div>
+        </section>
+
+
+        <!-- 6. カテゴリー別記事ブロック (募集セクション) -->
+        <section id="recruitment-section">
+            <h1 class="text-3xl font-extrabold my-6 p-2 omocoro-border bg-white text-black omocoro-shadow inline-block">
+                募集中の企画
+            </h1>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mt-10">
+                
+                <!-- ブロック 1: 地の底の企画 -->
+                <div class="omocoro-border p-3 bg-gray-100 omocoro-shadow">
+                    <h3 class="text-lg font-black mb-3 omocoro-border bg-white text-omocoro-vivid-red p-1">企画募集</h3>
+                    <ul class="space-y-3">
+                        <li class="omocoro-border bg-white p-2 article-card hover:bg-gray-50 omocoro-shadow">
+                            <!-- カテゴリ値に合わせて更新 -->
+                            <a href="#" class="block">
+                                <p class="text-sm font-bold">1. 誰も考えつかないアイデア求ム</p>
+                                <p class="text-xs text-gray-500 font-mono mt-1">カテゴリー: 地の底の企画</p>
+                            </a>
+                        </li>
+                        <li class="omocoro-border bg-white p-2 article-card hover:bg-gray-50 omocoro-shadow">
+                            <!-- カテゴリ値に合わせて更新 -->
+                            <a href="#" class="block">
+                                <p class="text-sm font-bold">2. 夢で見た記事の再現チャレンジ</p>
+                                <p class="text-xs text-gray-500 font-mono mt-1">カテゴリー: 夢の再現チャレンジ</p>
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- ブロック 2: バズり記事 -->
+                <div class="omocoro-border p-3 bg-gray-200 omocoro-shadow">
+                    <h3 class="text-lg font-black mb-3 omocoro-border bg-white text-omocoro-vivid-red p-1">スタッフ募集</h3>
+                    <ul class="space-y-3">
+                        <li class="omocoro-border bg-white p-2 article-card hover:bg-gray-50 omocoro-shadow">
+                            <a href="#" class="block">
+                                <p class="text-sm font-bold">1. ライター（ネタ出し得意な人）</p>
+                                <p class="text-xs text-gray-500 font-mono mt-1">急募！</p>
+                            </a>
+                        </li>
+                        <li class="omocoro-border bg-white p-2 article-card hover:bg-gray-50 omocoro-shadow">
+                            <a href="#" class="block">
+                                <p class="text-sm font-bold">2. デザイナー（モノクロ編集可）</p>
+                                <p class="text-xs text-gray-500 font-mono mt-1">未経験歓迎</p>
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- ブロック 3: 読者参加型 -->
+                <div class="omocoro-border p-3 bg-gray-300 omocoro-shadow">
+                    <h3 class="text-lg font-black mb-3 omocoro-border bg-white text-omocoro-vivid-red p-1">読者参加型</h3>
+                    <ul class="space-y-3">
+                        <li class="omocoro-border bg-white p-2 article-card hover:bg-gray-50 omocoro-shadow">
+                             <!-- カテゴリ値に合わせて更新 -->
+                            <a href="#" class="block">
+                                <p class="text-sm font-bold">1. あなたの家の怪しい写真投稿</p>
+                                <p class="text-xs text-gray-500 font-mono mt-1">カテゴリー: 怪しい写真投稿</p>
+                            </a>
+                        </li>
+                        <li class="omocoro-border bg-white p-2 article-card hover:bg-gray-50 omocoro-shadow">
+                             <!-- カテゴリ値に合わせて更新 -->
+                            <a href="#" class="block">
+                                <p class="text-sm font-bold">2. 人生の最も無駄な話</p>
+                                <p class="text-xs text-gray-500 font-mono mt-1">カテゴリー: 人生の最も無駄な話</p>
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+        
+        <!-- 7. お問い合わせフォームセクション -->
+        <section id="contact-section" class="mt-12">
+            <h1 class="text-3xl font-extrabold my-6 p-2 omocoro-border bg-white text-black omocoro-shadow inline-block">
+                <i class="fas fa-envelope-open-text mr-2"></i> お問い合わせ
+            </h1>
+            <div class="omocoro-border omocoro-shadow bg-white p-4">
+                <p class="text-lg font-bold mb-3 omocoro-border-b pb-2">ご意見、ご感想、仕事の依頼はこちらから！</p>
+                <p class="text-sm text-gray-600 mb-4">※ Googleフォームを埋め込んでいます。このページではデータは保存されません。</p>
+
+                <!-- Googleフォーム埋め込み領域 (高さ修正) -->
+                <!-- form-iframe-containerクラスに修正を適用 -->
+                <div class="form-iframe-container omocoro-border-4 border-gray-300">
+                    <!-- 
+                        ★★★ ここにGoogleフォームの埋め込みiframeタグをペーストしてください ★★★★
+                    -->
+                    <iframe src="https://docs.google.com/forms/d/e/1FAIpQLSedBzbnpuoQpcAYY0cDuKY5D23PXSJOAcrKuLP2nwIT2JgVTA/viewform?embedded=true" width="640" height="585" frameborder="0" marginheight="0" marginwidth="0">読み込んでいます…</iframe>
+                    <!-- 
+                        このフォームは動作確認用のダミーURLです。
+                        実際に利用する場合は、必ずご自身のGoogleフォームのURLに置き換えてください。
+                    -->
+                </div>
+            </div>
+        </section>
+
+    </main>
+
+    <!-- 8. フッターエリア (黒の部分) -->
+    <footer class="omocoro-border-t-4 border-black p-4 bg-black text-white mt-12">
+        <div class="container mx-auto max-w-7xl text-center">
+            
+            <!-- 管理者の方へ。のリンクを小さく追加 -->
+            <a href="#" onclick="event.preventDefault(); openPasswordModal();" class="text-xs font-bold text-gray-400 hover:text-white mb-2 block transition-colors duration-150">
+                <i class="fas fa-cog mr-1"></i> 管理者の方へ。
+            </a>
+
+            <div class="flex justify-center space-x-4 mb-2 text-lg">
+                <a href="#" class="hover:text-omocoro-vivid-red"><i class="fab fa-twitter"></i></a>
+                <a href="#" class="hover:text-omocoro-vivid-red"><i class="fab fa-youtube"></i></a>
+                <a href="#" class="hover:text-omocoro-vivid-red"><i class="fab fa-instagram"></i></a>
+            </div>
+            <p class="text-xs font-bold text-gray-500">&copy; 2025 ベンキマンブログ</p>
+        </div>
+    </footer>
+    
+    <script>
+        // モバイルメニューのトグル機能
+        document.getElementById('menu-button').addEventListener('click', function() {
+            const menu = document.getElementById('mobile-menu');
+            menu.classList.toggle('hidden');
+        });
+    </script>
+
+</body>
+</html>
